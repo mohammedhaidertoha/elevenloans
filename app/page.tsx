@@ -11,7 +11,8 @@ export default function Home() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
-  const audioQueueRef = useRef<ArrayBuffer[]>([]);
+  const audioQueueRef = useRef<string[]>([]);
+  const lastCommitRef = useRef<number>(0);
 
   const connectToAgent = async () => {
     try {
@@ -47,11 +48,9 @@ export default function Home() {
         console.log('Received:', data);
         
         // Handle different message types from ElevenLabs
-        if (data.type === 'audio') {
-          // Play audio response
-          if (data.audio_event && data.audio_event.audio_base_64) {
-            playAudioDelta(data.audio_event.audio_base_64);
-          }
+        if (data.type === 'response.audio.delta' && data.delta) {
+          // Play PCM16 audio chunks
+          playAudioDelta(data.delta);
         } else if (data.type === 'message') {
           // Show text message
           setMessages(prev => [...prev, `Agent: ${data.message}`]);
@@ -60,7 +59,7 @@ export default function Home() {
         } else if (data.type === 'ping') {
           // Respond to ping
           ws.send(JSON.stringify({ type: 'pong' }));
-        } else if (data.type === 'conversation_initiation_metadata') {
+        } else if (data.type === 'session.updated') {
           setStatus('Ready - speak anytime! Agent can hear you now.');
         } else if (data.type === 'error') {
           console.error('ElevenLabs error:', data);
@@ -153,8 +152,15 @@ export default function Home() {
             // Send audio data in real-time to ElevenLabs
             const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(event.data))));
             wsRef.current.send(JSON.stringify({
-              user_audio_chunk: base64Audio
+              type: 'input_audio_buffer.append',
+              audio: base64Audio
             }));
+
+            const now = Date.now();
+            if (!lastCommitRef.current || now - lastCommitRef.current > 250) {
+              wsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+              lastCommitRef.current = now;
+            }
           } catch (error) {
             console.error('Error sending audio chunk:', error);
           }
@@ -186,8 +192,15 @@ export default function Home() {
             // Send audio data in real-time to ElevenLabs
             const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(pcmData.buffer))));
             wsRef.current.send(JSON.stringify({
-              user_audio_chunk: base64Audio
+              type: 'input_audio_buffer.append',
+              audio: base64Audio
             }));
+
+            const now = Date.now();
+            if (!lastCommitRef.current || now - lastCommitRef.current > 250) {
+              wsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+              lastCommitRef.current = now;
+            }
           } catch (error) {
             console.error('Error sending audio chunk:', error);
           }
@@ -233,17 +246,10 @@ export default function Home() {
     }
   };
 
-  const playAudioDelta = async (audioData: string) => {
+  const playAudioDelta = async (audioBase64: string) => {
     try {
-      // Decode base64 audio and play it
-      const binaryString = atob(audioData);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      
-      // Queue audio for playback
-      audioQueueRef.current.push(bytes.buffer);
+      // Queue base64 chunks; decode during playback to avoid decodeAudioData errors
+      audioQueueRef.current.push(audioBase64);
       
       // Process audio queue
       if (audioQueueRef.current.length === 1) {
@@ -256,13 +262,21 @@ export default function Home() {
 
   const processAudioQueue = async () => {
     while (audioQueueRef.current.length > 0) {
-      const audioBuffer = audioQueueRef.current.shift()!;
+      const audioBase64 = audioQueueRef.current.shift()!;
       
       try {
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const decodedBuffer = await audioContext.decodeAudioData(audioBuffer);
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        // Convert base64 PCM16 to Float32 and play via AudioBuffer
+        const binaryString = atob(audioBase64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        const pcm16 = new Int16Array(bytes.buffer);
+        const float32 = new Float32Array(pcm16.length);
+        for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 0x7FFF;
+        const buffer = audioContext.createBuffer(1, float32.length, 24000);
+        buffer.copyToChannel(float32, 0, 0);
         const source = audioContext.createBufferSource();
-        source.buffer = decodedBuffer;
+        source.buffer = buffer;
         source.connect(audioContext.destination);
         source.start();
         
