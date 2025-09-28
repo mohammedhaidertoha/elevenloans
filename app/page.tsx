@@ -102,8 +102,12 @@ COMPLIANCE: Always mention that the call may be recorded.`,
               return [...prev, `Agent: ${data.delta}`];
             }
           });
-        } else if (data.type === 'agent_response' && data.agent_response_event?.transcript) {
-          setMessages(prev => [...prev, `Agent: ${data.agent_response_event.transcript}`]);
+        } else if (data.type === 'agent_response') {
+          if (data.agent_response_event?.transcript) {
+            setMessages(prev => [...prev, `Agent: ${data.agent_response_event.transcript}`]);
+          }
+          // Agent finished speaking, ready for next input
+          setStatus('Ready - speak anytime');
         } else if (data.type === 'conversation_initiation_metadata') {
           setStatus('Ready - speak anytime! Agent can hear you now.');
         } else if (data.type === 'session.updated') {
@@ -127,9 +131,13 @@ COMPLIANCE: Always mention that the call may be recorded.`,
           setMessages(prev => [...prev, `Agent: ${data.message}`]);
         } else if (data.type === 'interruption') {
           setStatus('Agent interrupted');
-        } else if (data.type === 'ping' && data.ping_event?.ping_id) {
-          // Respond to ping with matching id
-          ws.send(JSON.stringify({ type: 'pong', pong_event: { ping_id: data.ping_event.ping_id } }));
+        } else if (data.type === 'ping') {
+          // Respond to ping to keep connection alive
+          if (data.ping_event?.ping_id) {
+            ws.send(JSON.stringify({ type: 'pong', pong_event: { ping_id: data.ping_event.ping_id } }));
+          } else {
+            ws.send(JSON.stringify({ type: 'pong' }));
+          }
         } else if (data.type === 'error') {
           console.error('ElevenLabs error:', data);
           setStatus(`Agent error: ${data.message || 'Unknown error'}`);
