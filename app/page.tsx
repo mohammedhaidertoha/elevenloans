@@ -55,7 +55,9 @@ export default function Home() {
         // Handle different message types from ElevenLabs
         if (data.type === 'audio') {
           // Play audio response
-          playAudioDelta(data.audio_event.audio_base_64);
+          if (data.audio_event && data.audio_event.audio_base_64) {
+            playAudioDelta(data.audio_event.audio_base_64);
+          }
         } else if (data.type === 'message') {
           // Show text message
           setMessages(prev => [...prev, `Agent: ${data.message}`]);
@@ -66,6 +68,11 @@ export default function Home() {
           ws.send(JSON.stringify({ type: 'pong' }));
         } else if (data.type === 'conversation_initiation_metadata') {
           setStatus('Ready - speak anytime! Agent can hear you now.');
+        } else if (data.type === 'error') {
+          console.error('ElevenLabs error:', data);
+          setStatus(`Agent error: ${data.message || 'Unknown error'}`);
+        } else {
+          console.log('Unhandled message type:', data.type, data);
         }
       };
 
@@ -79,7 +86,10 @@ export default function Home() {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        setStatus('Connection error');
+        setStatus('Connection error - check console for details');
+        setIsConnected(false);
+        setIsStreaming(false);
+        stopAudioStream();
       };
 
     } catch (error) {
@@ -110,75 +120,123 @@ export default function Home() {
       });
       audioContextRef.current = audioContext;
       
-      // Add audio worklet processor
-      await audioContext.audioWorklet.addModule(
-        'data:text/javascript,' + encodeURIComponent(`
-          class AudioProcessor extends AudioWorkletProcessor {
-            process(inputs, outputs, parameters) {
-              const input = inputs[0];
-              if (input.length > 0) {
-                const inputData = input[0];
-                
-                // Convert float32 to int16 PCM
-                const pcmData = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                  pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-                }
-                
-                // Send to main thread
-                this.port.postMessage(pcmData.buffer);
-              }
-              return true;
-            }
-          }
-          registerProcessor('audio-processor', AudioProcessor);
-        `)
-      );
-      
       const source = audioContext.createMediaStreamSource(stream);
-      const worklet = new AudioWorkletNode(audioContext, 'audio-processor');
-      workletRef.current = worklet;
       
-      worklet.port.onmessage = (event) => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      // Try AudioWorklet first, fallback to ScriptProcessor if needed
+      try {
+        // Add audio worklet processor
+        await audioContext.audioWorklet.addModule(
+          'data:text/javascript,' + encodeURIComponent(`
+            class AudioProcessor extends AudioWorkletProcessor {
+              process(inputs, outputs, parameters) {
+                const input = inputs[0];
+                if (input.length > 0) {
+                  const inputData = input[0];
+                  
+                  // Convert float32 to int16 PCM
+                  const pcmData = new Int16Array(inputData.length);
+                  for (let i = 0; i < inputData.length; i++) {
+                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                  }
+                  
+                  // Send to main thread
+                  this.port.postMessage(pcmData.buffer);
+                }
+                return true;
+              }
+            }
+            registerProcessor('audio-processor', AudioProcessor);
+          `)
+        );
         
-        // Send audio data in real-time to ElevenLabs
-        const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(event.data))));
-        wsRef.current.send(JSON.stringify({
-          user_audio_chunk: base64Audio
-        }));
-      };
-      
-      source.connect(worklet);
-      worklet.connect(audioContext.destination);
+        const worklet = new AudioWorkletNode(audioContext, 'audio-processor');
+        workletRef.current = worklet;
+        
+        worklet.port.onmessage = (event) => {
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+          
+          try {
+            // Send audio data in real-time to ElevenLabs
+            const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(event.data))));
+            wsRef.current.send(JSON.stringify({
+              user_audio_chunk: base64Audio
+            }));
+          } catch (error) {
+            console.error('Error sending audio chunk:', error);
+          }
+        };
+        
+        source.connect(worklet);
+        worklet.connect(audioContext.destination);
+        
+      } catch (workletError) {
+        console.warn('AudioWorklet not supported, using ScriptProcessor fallback:', workletError);
+        
+        // Fallback to ScriptProcessor for older browsers
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        workletRef.current = processor as any; // Type compatibility
+        
+        processor.onaudioprocess = (event) => {
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+          
+          try {
+            const inputBuffer = event.inputBuffer;
+            const inputData = inputBuffer.getChannelData(0);
+            
+            // Convert float32 to int16 PCM
+            const pcmData = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+              pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+            }
+            
+            // Send audio data in real-time to ElevenLabs
+            const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(pcmData.buffer))));
+            wsRef.current.send(JSON.stringify({
+              user_audio_chunk: base64Audio
+            }));
+          } catch (error) {
+            console.error('Error sending audio chunk:', error);
+          }
+        };
+        
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+      }
       
       setIsStreaming(true);
       setStatus('Ready - speak anytime! Agent can hear you now.');
       
     } catch (error) {
       console.error('Failed to start audio stream:', error);
-      setStatus('Microphone access denied');
+      setStatus(`Audio stream error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setIsStreaming(false);
     }
   };
 
   const stopAudioStream = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
-      mediaStreamRef.current = null;
+    try {
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+        mediaStreamRef.current = null;
+      }
+      
+      if (workletRef.current) {
+        workletRef.current.disconnect();
+        workletRef.current = null;
+      }
+      
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+      
+      setIsStreaming(false);
+      setStatus('Audio stream stopped');
+    } catch (error) {
+      console.error('Error stopping audio stream:', error);
+      setIsStreaming(false);
+      setStatus('Audio stream stopped with errors');
     }
-    
-    if (workletRef.current) {
-      workletRef.current.disconnect();
-      workletRef.current = null;
-    }
-    
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    
-    setIsStreaming(false);
-    setStatus('Audio stream stopped');
   };
 
   const playAudioDelta = async (audioData: string) => {
