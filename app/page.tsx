@@ -281,25 +281,57 @@ export default function Home() {
       const audioBase64 = audioQueueRef.current.shift()!;
       
       try {
+        console.log('Processing audio chunk, base64 length:', audioBase64.length);
+        
+        // Create a new AudioContext for each chunk to avoid issues
         const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        
+        // Resume context if suspended (required for some browsers)
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        
         // Convert base64 PCM16 to Float32 and play via AudioBuffer
         const binaryString = atob(audioBase64);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        
+        // Ensure we have valid audio data
+        if (bytes.length === 0 || bytes.length % 2 !== 0) {
+          console.warn('Invalid audio data length:', bytes.length);
+          continue;
+        }
+        
         const pcm16 = new Int16Array(bytes.buffer);
         const float32 = new Float32Array(pcm16.length);
-        for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 0x7FFF;
+        for (let i = 0; i < pcm16.length; i++) {
+          float32[i] = Math.max(-1, Math.min(1, pcm16[i] / 0x7FFF));
+        }
+        
         const buffer = audioContext.createBuffer(1, float32.length, 24000);
         buffer.copyToChannel(float32, 0, 0);
         const source = audioContext.createBufferSource();
         source.buffer = buffer;
         source.connect(audioContext.destination);
+        
+        console.log('Playing audio chunk, duration:', buffer.duration, 'seconds');
         source.start();
         
         // Wait for audio to finish before playing next chunk
         await new Promise(resolve => {
-          source.onended = resolve;
+          source.onended = () => {
+            console.log('Audio chunk finished playing');
+            audioContext.close(); // Clean up
+            resolve(undefined);
+          };
+          // Fallback timeout in case onended doesn't fire
+          setTimeout(() => {
+            console.log('Audio chunk timeout, continuing...');
+            audioContext.close();
+            resolve(undefined);
+          }, buffer.duration * 1000 + 100);
         });
+        
       } catch (error) {
         console.error('Error playing audio chunk:', error);
       }
