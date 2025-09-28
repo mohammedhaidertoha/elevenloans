@@ -38,14 +38,8 @@ export default function Home() {
         setIsConnected(true);
         setStatus('Connected! Click "Start Conversation" to begin real-time chat.');
         
-        // Send authentication and agent configuration
-        ws.send(JSON.stringify({
-          user_auth: {
-            type: 'api_key',
-            value: apiKey
-          },
-          agent_id: agentId
-        }));
+        // Connection established with agent ID in URL
+        console.log('Connected to ElevenLabs agent:', agentId);
       };
 
       ws.onmessage = (event) => {
