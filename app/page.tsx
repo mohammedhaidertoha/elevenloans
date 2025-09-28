@@ -4,12 +4,14 @@ import { useState, useRef, useEffect } from 'react';
 
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [messages, setMessages] = useState<string[]>([]);
   const [status, setStatus] = useState<string>('Ready to connect');
   const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
 
   const connectToAgent = async () => {
     try {
@@ -34,17 +36,14 @@ export default function Home() {
 
       ws.onopen = () => {
         setIsConnected(true);
-        setStatus('Connected! Click the microphone to start talking.');
+        setStatus('Connected! Click "Start Conversation" to begin real-time chat.');
         
-        // Send authentication with API key
+        // Send initial configuration for real-time conversation
         ws.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: {
-            type: 'message',
-            role: 'system',
-            content: [{
-              type: 'input_text',
-              text: `You are a professional and empathetic debt resolution agent working for a private equity firm. Your role is to help customers resolve outstanding loan payments in a respectful manner.
+          type: 'session.update',
+          session: {
+            modalities: ['text', 'audio'],
+            instructions: `You are a professional and empathetic debt resolution agent working for a private equity firm. Your role is to help customers resolve outstanding loan payments in a respectful manner.
 
 PROCESS:
 1. GREET & VERIFY: Start by greeting the customer and asking for their full name to verify their account.
@@ -61,9 +60,20 @@ AVAILABLE TOOLS:
 - book_callback(customerId, isoDatetime): Books a callback.
 - check_payment_status(customerId): Checks if a payment was successful.
 
-TONE: Professional, empathetic, and solution-focused.
-COMPLIANCE: Always mention that the call may be recorded.`
-            }]
+TONE: Professional, empathetic, and solution-focused. Respond naturally and conversationally.
+COMPLIANCE: Always mention that the call may be recorded.`,
+            voice: 'alloy',
+            input_audio_format: 'pcm16',
+            output_audio_format: 'pcm16',
+            input_audio_transcription: {
+              model: 'whisper-1'
+            },
+            turn_detection: {
+              type: 'server_vad',
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 200
+            }
           }
         }));
       };
@@ -72,18 +82,35 @@ COMPLIANCE: Always mention that the call may be recorded.`
         const data = JSON.parse(event.data);
         console.log('Received:', data);
         
-        if (data.type === 'conversation.item.created' && data.item?.content) {
-          const content = data.item.content[0];
-          if (content.type === 'text') {
-            setMessages(prev => [...prev, `Agent: ${content.text}`]);
-          }
+        // Handle different message types
+        if (data.type === 'response.audio.delta' && data.delta) {
+          // Play audio response in real-time
+          playAudioDelta(data.delta);
+        } else if (data.type === 'response.text.delta' && data.delta) {
+          // Show text response in real-time
+          setMessages(prev => {
+            const lastMessage = prev[prev.length - 1];
+            if (lastMessage && lastMessage.startsWith('Agent: ')) {
+              return [...prev.slice(0, -1), lastMessage + data.delta];
+            } else {
+              return [...prev, `Agent: ${data.delta}`];
+            }
+          });
+        } else if (data.type === 'input_audio_buffer.speech_started') {
+          setStatus('Listening...');
+        } else if (data.type === 'input_audio_buffer.speech_stopped') {
+          setStatus('Processing...');
+        } else if (data.type === 'response.done') {
+          setStatus('Ready - speak anytime');
         }
       };
 
       ws.onclose = (event) => {
         setIsConnected(false);
+        setIsStreaming(false);
         setStatus(`Disconnected: ${event.reason || 'Connection closed'}`);
         console.log('WebSocket closed:', event);
+        stopAudioStream();
       };
 
       ws.onerror = (error) => {
@@ -97,86 +124,148 @@ COMPLIANCE: Always mention that the call may be recorded.`
     }
   };
 
-  const startRecording = async () => {
+  const startAudioStream = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
+      setStatus('Starting microphone...');
+      
+      // Get microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: 24000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
+      
+      mediaStreamRef.current = stream;
+      
+      // Create audio context for real-time processing
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 24000
+      });
+      audioContextRef.current = audioContext;
+      
+      // Add audio worklet processor
+      await audioContext.audioWorklet.addModule(
+        'data:text/javascript,' + encodeURIComponent(`
+          class AudioProcessor extends AudioWorkletProcessor {
+            process(inputs, outputs, parameters) {
+              const input = inputs[0];
+              if (input.length > 0) {
+                const inputData = input[0];
+                
+                // Convert float32 to int16 PCM
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                  pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                }
+                
+                // Send to main thread
+                this.port.postMessage(pcmData.buffer);
+              }
+              return true;
+            }
+          }
+          registerProcessor('audio-processor', AudioProcessor);
+        `)
+      );
+      
+      const source = audioContext.createMediaStreamSource(stream);
+      const worklet = new AudioWorkletNode(audioContext, 'audio-processor');
+      workletRef.current = worklet;
+      
+      worklet.port.onmessage = (event) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        
+        // Send audio data in real-time
+        const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(event.data))));
+        wsRef.current.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: base64Audio
+        }));
       };
-
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        sendAudioToAgent(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setStatus('Recording... Click again to send');
+      
+      source.connect(worklet);
+      worklet.connect(audioContext.destination);
+      
+      setIsStreaming(true);
+      setStatus('Ready - speak anytime! Agent can hear you now.');
+      
     } catch (error) {
-      console.error('Failed to start recording:', error);
+      console.error('Failed to start audio stream:', error);
       setStatus('Microphone access denied');
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      setStatus('Processing audio...');
+  const stopAudioStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
     }
+    
+    if (workletRef.current) {
+      workletRef.current.disconnect();
+      workletRef.current = null;
+    }
+    
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    
+    setIsStreaming(false);
+    setStatus('Audio stream stopped');
   };
 
-  const sendAudioToAgent = async (audioBlob: Blob) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setStatus('Not connected to agent');
-      return;
-    }
-
+  const playAudioDelta = async (audioData: string) => {
     try {
-      // Convert audio to base64
-      const arrayBuffer = await audioBlob.arrayBuffer();
-      const uint8Array = new Uint8Array(arrayBuffer);
-      const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(uint8Array)));
-
-      // Send audio to agent
-      wsRef.current.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{
-            type: 'input_audio',
-            audio: base64Audio
-          }]
-        }
-      }));
-
-      // Trigger response generation
-      wsRef.current.send(JSON.stringify({
-        type: 'response.create',
-        response: {
-          modalities: ['text', 'audio'],
-          instructions: 'Please respond to the customer appropriately based on their input.'
-        }
-      }));
-
-      setStatus('Sent! Agent is responding...');
+      // Decode base64 audio and play it
+      const binaryString = atob(audioData);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Queue audio for playback
+      audioQueueRef.current.push(bytes.buffer);
+      
+      // Process audio queue
+      if (audioQueueRef.current.length === 1) {
+        processAudioQueue();
+      }
     } catch (error) {
-      console.error('Failed to send audio:', error);
-      setStatus('Failed to send audio');
+      console.error('Failed to play audio:', error);
     }
   };
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      stopRecording();
+  const processAudioQueue = async () => {
+    while (audioQueueRef.current.length > 0) {
+      const audioBuffer = audioQueueRef.current.shift()!;
+      
+      try {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const decodedBuffer = await audioContext.decodeAudioData(audioBuffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = decodedBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+        
+        // Wait for audio to finish before playing next chunk
+        await new Promise(resolve => {
+          source.onended = resolve;
+        });
+      } catch (error) {
+        console.error('Error playing audio chunk:', error);
+      }
+    }
+  };
+
+  const toggleConversation = () => {
+    if (isStreaming) {
+      stopAudioStream();
     } else {
-      startRecording();
+      startAudioStream();
     }
   };
 
@@ -199,13 +288,18 @@ COMPLIANCE: Always mention that the call may be recorded.`
               Connect to Agent
             </button>
           ) : (
-            <button 
-              className={`mic-button ${isRecording ? 'active' : ''}`}
-              onClick={toggleRecording}
-              title={isRecording ? 'Click to stop recording' : 'Click to start recording'}
-            >
-              🎤
-            </button>
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+              <button 
+                className={`button ${isStreaming ? 'active' : ''}`}
+                onClick={toggleConversation}
+                style={{ 
+                  backgroundColor: isStreaming ? '#dc3545' : '#28a745',
+                  color: 'white'
+                }}
+              >
+                {isStreaming ? '🔴 End Conversation' : '🎤 Start Conversation'}
+              </button>
+            </div>
           )}
         </div>
 
@@ -233,18 +327,21 @@ COMPLIANCE: Always mention that the call may be recorded.`
           <h3>Demo Instructions</h3>
           <ol style={{ paddingLeft: '1.5rem', lineHeight: '1.6' }}>
             <li>Click "Connect to Agent" to establish connection</li>
-            <li>Click the microphone button to start recording</li>
-            <li>Speak your message (e.g., "Hi, my name is John Smith")</li>
-            <li>Click the microphone again to send your message</li>
-            <li>The agent will respond and guide you through payment or callback options</li>
+            <li>Click "Start Conversation" to begin real-time chat</li>
+            <li>Speak naturally - the agent can hear you in real-time</li>
+            <li>Say "Hi, my name is John Smith" to begin</li>
+            <li>The agent will respond immediately and guide you through options</li>
+            <li>Click "End Conversation" when finished</li>
           </ol>
         </div>
 
         <div className="card">
-          <h3>Test Scenarios</h3>
+          <h3>Real-Time Features</h3>
           <ul style={{ paddingLeft: '1.5rem', lineHeight: '1.6' }}>
-            <li><strong>Payment Flow:</strong> Say you want to pay now</li>
-            <li><strong>Callback Flow:</strong> Say you can't pay right now and need to schedule a call</li>
+            <li><strong>🎤 Live Audio:</strong> Agent hears you speaking in real-time</li>
+            <li><strong>🔊 Instant Response:</strong> Agent responds immediately like a phone call</li>
+            <li><strong>💬 Natural Flow:</strong> No need to wait or press buttons</li>
+            <li><strong>🔄 Interruption:</strong> You can speak while agent is talking</li>
           </ul>
         </div>
       </div>
