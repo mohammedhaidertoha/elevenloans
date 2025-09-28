@@ -1,0 +1,73 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# Cursor Rules
+
+These rules guide AI-generated code for this project.  
+Goal: Keep the codebase **clean, consistent, and easy to collaborate on** during the hackathon.
+
+---
+
+## ✨ Code Style
+- Use **TypeScript** with explicit types where possible.
+- Prefer `const` over `let`. Avoid `var`.
+- Use **async/await** instead of `.then` chaining.
+- Keep functions **small and focused** (single responsibility).
+- Use **descriptive names** for variables, functions, and files.
+- Avoid magic numbers/strings — use constants or enums.
+
+---
+
+## 📂 Project Structure
+- Keep related code grouped by feature (not just type).
+- Use `lib/` for helpers and utilities.
+- Use `components/` for reusable UI.
+- Avoid deep nesting — prefer a flat structure where possible.
+- One module = one responsibility.
+
+---
+
+## 🧩 Functions & Components
+- Keep functions under ~30 lines when possible.
+- Pass only the data a function/component needs (avoid huge props/args).
+- Make components **presentational by default**; move logic to helpers/hooks.
+- Reuse instead of rewriting — DRY (Don’t Repeat Yourself).
+
+---
+
+## 🔒 Security & Safety
+- Never hardcode secrets or credentials.
+- Keep environment variables in `.env.local`.
+- Validate and sanitize any external data.
+- Fail gracefully — don’t let one error crash the app.
+
+---
+
+## ⚡ Performance
+- Avoid unnecessary API calls or heavy computations in render.
+- Cache or memoize where it makes sense.
+- Prefer streaming/lazy loading over blocking operations.
+
+---
+
+## 🧪 Testing & Debugging
+- Write **simple tests** for critical functions if time allows.
+- Use `console.error`/`console.warn` for failures (remove noise).
+- Add minimal error boundaries for UI crashes.
+
+---
+
+## 📖 Collaboration
+- Write **clear commit messages** (e.g., `feat: add auth flow`, `fix: handle null case`).
+- Comment tricky logic, but avoid over-commenting obvious code.
+- Keep PRs/commits small and focused.
+- Optimize for readability over cleverness.
+
+---
+
+## ✅ Hackathon Priorities
+1. **Clarity** → teammates can read/understand code quickly.  
+2. **Stability** → errors handled, app doesn’t break in demos.  
+3. **Speed** → ship features fast, refactor later if time.  
