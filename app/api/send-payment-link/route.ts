@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ 
       ok: true, 
-      message: `Payment link sent to ${customer.email}`,
+      message: `Payment link sent to loanseleven@gmail.com`,
       url: paymentUrl 
     });
 

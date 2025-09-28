@@ -13,17 +13,30 @@ export default function Home() {
 
   const connectToAgent = async () => {
     try {
-      setStatus('Connecting to voice agent...');
+      setStatus('Authenticating and connecting to voice agent...');
       
+      // Get authentication details from our secure proxy
+      const authResponse = await fetch('/api/elevenlabs-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      if (!authResponse.ok) {
+        throw new Error('Failed to authenticate for WebSocket connection.');
+      }
+
+      const { url: wsUrl, apiKey } = await authResponse.json();
+
       // Initialize WebSocket connection to ElevenLabs
-      const ws = new WebSocket('wss://api.elevenlabs.io/v1/convai/conversation');
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         setIsConnected(true);
         setStatus('Connected! Click the microphone to start talking.');
         
-        // Send initial configuration
+        // Send authentication with API key
         ws.send(JSON.stringify({
           type: 'conversation.item.create',
           item: {
@@ -33,22 +46,23 @@ export default function Home() {
               type: 'input_text',
               text: `You are a professional and empathetic debt resolution agent working for a private equity firm. Your role is to help customers resolve outstanding loan payments in a respectful manner.
 
-IMPORTANT INSTRUCTIONS:
-1. Always start by verifying the customer's identity by asking for their full name
-2. Once verified, inform them of their outstanding amount due
-3. Offer two clear options:
-   - Option 1: If they can pay now, offer to send a secure payment link to their email
-   - Option 2: If they cannot pay now, offer to schedule a callback with a human representative
+PROCESS:
+1. GREET & VERIFY: Start by greeting the customer and asking for their full name to verify their account.
+2. FIND CUSTOMER: Once you have the name, you MUST use the find_customer_by_name tool to get their customerId and amountDue.
+3. INFORM: State the customer's full name and the outstanding amount you found.
+4. OFFER OPTIONS: Offer two clear options:
+   - If they can pay now, use the send_payment_link tool with the customerId you found.
+   - If they cannot pay now, use the book_callback tool with the customerId.
+5. CONFIRM STATUS (Optional): Use check_payment_status if the customer asks for confirmation after paying.
 
 AVAILABLE TOOLS:
-- send_payment_link(customerId): Sends a secure payment link to customer's email
-- check_payment_status(customerId): Checks if payment has been completed
-- book_callback(customerId, isoDatetime): Books a callback appointment
+- find_customer_by_name(customerName): Gets the customer's ID and debt amount. USE THIS FIRST.
+- send_payment_link(customerId): Sends a secure payment link.
+- book_callback(customerId, isoDatetime): Books a callback.
+- check_payment_status(customerId): Checks if a payment was successful.
 
-TONE: Professional, empathetic, and solution-focused. Never be aggressive or threatening.
-COMPLIANCE: Always mention this call may be recorded and you represent the debt collection agency.
-
-Start the conversation by greeting the customer and asking for their name to verify their account.`
+TONE: Professional, empathetic, and solution-focused.
+COMPLIANCE: Always mention that the call may be recorded.`
             }]
           }
         }));
@@ -66,9 +80,10 @@ Start the conversation by greeting the customer and asking for their name to ver
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setIsConnected(false);
-        setStatus('Disconnected');
+        setStatus(`Disconnected: ${event.reason || 'Connection closed'}`);
+        console.log('WebSocket closed:', event);
       };
 
       ws.onerror = (error) => {
@@ -94,7 +109,7 @@ Start the conversation by greeting the customer and asking for their name to ver
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         sendAudioToAgent(audioBlob);
         stream.getTracks().forEach(track => track.stop());
       };
