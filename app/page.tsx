@@ -319,17 +319,21 @@ export default function Home() {
         
         // Wait for audio to finish before playing next chunk
         await new Promise(resolve => {
+          const timeoutId = setTimeout(() => {
+            console.warn('Audio chunk timeout, continuing...');
+            if (audioContext.state !== 'closed') {
+              audioContext.close();
+            }
+            resolve(undefined);
+          }, buffer.duration * 1000 + 250); // Increased timeout buffer
+
           source.onended = () => {
-            console.log('Audio chunk finished playing');
-            audioContext.close(); // Clean up
+            clearTimeout(timeoutId); // Prevent the timeout from firing
+            if (audioContext.state !== 'closed') {
+              audioContext.close(); // Clean up
+            }
             resolve(undefined);
           };
-          // Fallback timeout in case onended doesn't fire
-          setTimeout(() => {
-            console.log('Audio chunk timeout, continuing...');
-            audioContext.close();
-            resolve(undefined);
-          }, buffer.duration * 1000 + 100);
         });
         
       } catch (error) {
