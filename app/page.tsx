@@ -69,6 +69,7 @@ export default function Home() {
           // Respond to ping to keep connection alive - ElevenLabs format
           if (data.ping_event?.event_id) {
             ws.send(JSON.stringify({ type: 'pong', event_id: data.ping_event.event_id }));
+            console.log('Sent pong for event_id:', data.ping_event.event_id);
           } else if (data.ping_event?.ping_id) {
             ws.send(JSON.stringify({ type: 'pong', event_id: data.ping_event.ping_id }));
           } else {
@@ -171,6 +172,7 @@ export default function Home() {
                   audio_base_64: base64Audio
                 }
               }));
+              console.log('Sent audio chunk, size:', event.data.byteLength);
             }
           } catch (error) {
             console.error('Error sending audio chunk:', error);
@@ -209,6 +211,7 @@ export default function Home() {
                   audio_base_64: base64Audio
                 }
               }));
+              console.log('Sent audio chunk (fallback), size:', pcmData.length);
             }
           } catch (error) {
             console.error('Error sending audio chunk:', error);
@@ -260,6 +263,7 @@ export default function Home() {
 
   const playAudioDelta = async (audioBase64: string) => {
     try {
+      console.log('Received audio chunk for playback, length:', audioBase64.length);
       // Queue base64 chunks; decode during playback to avoid decodeAudioData errors
       audioQueueRef.current.push(audioBase64);
       
