@@ -13,8 +13,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Return the WebSocket URL with authentication parameters
-    // ElevenLabs Conversational AI uses WebSocket directly with query params for auth
-    const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`;
+    // ElevenLabs Conversational AI WebSocket URL
+    const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation`;
     
     return NextResponse.json({
       url: wsUrl,

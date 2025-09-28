@@ -28,7 +28,7 @@ export default function Home() {
         throw new Error('Failed to authenticate for WebSocket connection.');
       }
 
-      const { url: wsUrl, apiKey } = await authResponse.json();
+      const { url: wsUrl, apiKey, agentId } = await authResponse.json();
 
       // Initialize WebSocket connection to ElevenLabs
       const ws = new WebSocket(wsUrl);
@@ -38,43 +38,13 @@ export default function Home() {
         setIsConnected(true);
         setStatus('Connected! Click "Start Conversation" to begin real-time chat.');
         
-        // Send initial configuration for real-time conversation
+        // Send authentication and agent configuration
         ws.send(JSON.stringify({
-          type: 'session.update',
-          session: {
-            modalities: ['text', 'audio'],
-            instructions: `You are a professional and empathetic debt resolution agent working for a private equity firm. Your role is to help customers resolve outstanding loan payments in a respectful manner.
-
-PROCESS:
-1. GREET & VERIFY: Start by greeting the customer and asking for their full name to verify their account.
-2. FIND CUSTOMER: Once you have the name, you MUST use the find_customer_by_name tool to get their customerId and amountDue.
-3. INFORM: State the customer's full name and the outstanding amount you found.
-4. OFFER OPTIONS: Offer two clear options:
-   - If they can pay now, use the send_payment_link tool with the customerId you found.
-   - If they cannot pay now, use the book_callback tool with the customerId.
-5. CONFIRM STATUS (Optional): Use check_payment_status if the customer asks for confirmation after paying.
-
-AVAILABLE TOOLS:
-- find_customer_by_name(customerName): Gets the customer's ID and debt amount. USE THIS FIRST.
-- send_payment_link(customerId): Sends a secure payment link.
-- book_callback(customerId, isoDatetime): Books a callback.
-- check_payment_status(customerId): Checks if a payment was successful.
-
-TONE: Professional, empathetic, and solution-focused. Respond naturally and conversationally.
-COMPLIANCE: Always mention that the call may be recorded.`,
-            voice: 'alloy',
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            input_audio_transcription: {
-              model: 'whisper-1'
-            },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 200
-            }
-          }
+          user_auth: {
+            type: 'api_key',
+            value: apiKey
+          },
+          agent_id: agentId
         }));
       };
 
@@ -82,26 +52,20 @@ COMPLIANCE: Always mention that the call may be recorded.`,
         const data = JSON.parse(event.data);
         console.log('Received:', data);
         
-        // Handle different message types
-        if (data.type === 'response.audio.delta' && data.delta) {
-          // Play audio response in real-time
-          playAudioDelta(data.delta);
-        } else if (data.type === 'response.text.delta' && data.delta) {
-          // Show text response in real-time
-          setMessages(prev => {
-            const lastMessage = prev[prev.length - 1];
-            if (lastMessage && lastMessage.startsWith('Agent: ')) {
-              return [...prev.slice(0, -1), lastMessage + data.delta];
-            } else {
-              return [...prev, `Agent: ${data.delta}`];
-            }
-          });
-        } else if (data.type === 'input_audio_buffer.speech_started') {
-          setStatus('Listening...');
-        } else if (data.type === 'input_audio_buffer.speech_stopped') {
-          setStatus('Processing...');
-        } else if (data.type === 'response.done') {
-          setStatus('Ready - speak anytime');
+        // Handle different message types from ElevenLabs
+        if (data.type === 'audio') {
+          // Play audio response
+          playAudioDelta(data.audio_event.audio_base_64);
+        } else if (data.type === 'message') {
+          // Show text message
+          setMessages(prev => [...prev, `Agent: ${data.message}`]);
+        } else if (data.type === 'interruption') {
+          setStatus('Agent interrupted');
+        } else if (data.type === 'ping') {
+          // Respond to ping
+          ws.send(JSON.stringify({ type: 'pong' }));
+        } else if (data.type === 'conversation_initiation_metadata') {
+          setStatus('Ready - speak anytime! Agent can hear you now.');
         }
       };
 
@@ -178,11 +142,10 @@ COMPLIANCE: Always mention that the call may be recorded.`,
       worklet.port.onmessage = (event) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         
-        // Send audio data in real-time
+        // Send audio data in real-time to ElevenLabs
         const base64Audio = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(event.data))));
         wsRef.current.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: base64Audio
+          user_audio_chunk: base64Audio
         }));
       };
       
